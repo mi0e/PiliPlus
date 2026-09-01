@@ -101,12 +101,24 @@ jobs:
               $tag = $release.tag_name
               $publish = $true
             } else {
-              $ref = 'main'
+              $upstream = gh api "repos/$env:UPSTREAM_REPOSITORY" | ConvertFrom-Json
+              $upstreamBranch = $upstream.default_branch
+              git -C ./fork-layer remote add build-upstream "https://github.com/$env:UPSTREAM_REPOSITORY.git"
+              git -C ./fork-layer fetch --no-tags build-upstream $upstreamBranch
+              if ($LASTEXITCODE -ne 0) { throw 'Unable to fetch the upstream default branch' }
+              $ref = (git -C ./fork-layer merge-base HEAD FETCH_HEAD).Trim()
+              if (-not $ref) { throw 'Unable to resolve the upstream commit contained in fork main' }
               $tag = ''
               $publish = $false
             }
           } elseif ($env:GITHUB_EVENT_NAME -eq 'push') {
-            $ref = 'main'
+            $upstream = gh api "repos/$env:UPSTREAM_REPOSITORY" | ConvertFrom-Json
+            $upstreamBranch = $upstream.default_branch
+            git -C ./fork-layer remote add build-upstream "https://github.com/$env:UPSTREAM_REPOSITORY.git"
+            git -C ./fork-layer fetch --no-tags build-upstream $upstreamBranch
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to fetch the upstream default branch' }
+            $ref = (git -C ./fork-layer merge-base HEAD FETCH_HEAD).Trim()
+            if (-not $ref) { throw 'Unable to resolve the upstream commit contained in fork main' }
             $tag = ''
             $publish = $false
           }

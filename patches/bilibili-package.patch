@@ -43,15 +43,6 @@ diff --git a/android/app/src/main/AndroidManifest.xml b/android/app/src/main/And
  
                  <category android:name="android.intent.category.DEFAULT" />
                  <category android:name="android.intent.category.BROWSABLE" />
-@@ -212,7 +211,7 @@
-             android:permission="android.permission.MANAGE_DOCUMENTS"
-             android:enabled="false"
-             android:exported="true"
--            android:authorities="com.example.piliplus.MTDataFilesProvider"
-+            android:authorities="${applicationId}.MTDataFilesProvider"
-             android:grantUriPermissions="true">
-             <intent-filter>
-                 <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
 diff --git a/android/app/src/main/res/xml-v25/shortcuts.xml b/android/app/src/main/res/xml-v25/shortcuts.xml
 --- a/android/app/src/main/res/xml-v25/shortcuts.xml
 +++ b/android/app/src/main/res/xml-v25/shortcuts.xml
