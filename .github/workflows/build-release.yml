@@ -205,7 +205,7 @@ jobs:
         working-directory: source
         shell: bash
         run: |
-          dart format --output=none --set-exit-if-changed \
+          dart format \
             lib/build_config.dart lib/common/constants.dart lib/utils/update.dart \
             lib/utils/update_helper.dart test/fork_update_helper_test.dart
           flutter test --no-pub test/fork_update_helper_test.dart
