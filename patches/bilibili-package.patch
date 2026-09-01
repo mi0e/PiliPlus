@@ -10,12 +10,13 @@ diff --git a/android/app/build.gradle.kts b/android/app/build.gradle.kts
          minSdk = flutter.minSdkVersion
          targetSdk = 37
          versionCode = flutter.versionCode
-@@ -43,12 +43,17 @@ android {
+@@ -43,12 +43,21 @@ android {
              it.load(properties.inputStream())
      }
  
 -    val config = keyProperties.getProperty("storeFile")?.let {
 +    val storeFilePath = System.getenv("ANDROID_KEYSTORE_PATH")
++        ?.takeIf { it.isNotBlank() }
 +        ?: keyProperties.getProperty("storeFile")
 +    val config = storeFilePath?.let {
          signingConfigs.create("release") {
@@ -24,10 +25,13 @@ diff --git a/android/app/build.gradle.kts b/android/app/build.gradle.kts
 -            keyAlias = keyProperties.getProperty("keyAlias")
 -            keyPassword = keyProperties.getProperty("keyPassword")
 +            storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
++                ?.takeIf { it.isNotBlank() }
 +                ?: keyProperties.getProperty("storePassword")
 +            keyAlias = System.getenv("ANDROID_KEY_ALIAS")
++                ?.takeIf { it.isNotBlank() }
 +                ?: keyProperties.getProperty("keyAlias")
 +            keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
++                ?.takeIf { it.isNotBlank() }
 +                ?: keyProperties.getProperty("keyPassword")
              enableV1Signing = true
              enableV2Signing = true
