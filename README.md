@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> 这是自动跟随 PiliPlus 上游的自定义 Fork。Android 包名、签名、更新源和安装限制请先阅读 [README-FORK.md](README-FORK.md)。
+
 <div align="center">
     <img width="200" height="200" src="assets/images/logo/logo.png">
 </div>

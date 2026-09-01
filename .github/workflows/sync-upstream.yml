@@ -1,0 +1,182 @@
+name: Fork - Sync upstream
+
+on:
+  schedule:
+    - cron: "17 20 * * *"
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: "Publish another fork revision even if this upstream Release was already built"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: bggRGjQaUbCoE/PiliPlus
+  FORK_BRANCH: main
+
+jobs:
+  sync:
+    name: Merge upstream and inspect Releases
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
+      upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
+      fork_sha: ${{ steps.sync.outputs.fork_sha }}
+      latest_tag: ${{ steps.sync.outputs.latest_tag }}
+      latest_release_sha: ${{ steps.sync.outputs.latest_release_sha }}
+      release_needed: ${{ steps.sync.outputs.release_needed }}
+    steps:
+      - name: Checkout fork maintenance branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: main
+          token: ${{ secrets.FORK_SYNC_TOKEN || github.token }}
+
+      - name: Merge upstream and evaluate release state
+        id: sync
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN || github.token }}
+          FORCE_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.force_release || false }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          $upstreamInfo = gh api "repos/$env:UPSTREAM_REPOSITORY" | ConvertFrom-Json
+          $upstreamBranch = $upstreamInfo.default_branch
+          git remote add upstream "https://github.com/$env:UPSTREAM_REPOSITORY.git"
+          git fetch --prune --tags upstream $upstreamBranch
+          $upstreamRef = "upstream/$upstreamBranch"
+          $upstreamSha = (git rev-parse $upstreamRef).Trim()
+          $beforeSha = (git rev-parse HEAD).Trim()
+          $changed = $false
+
+          git merge-base --is-ancestor $upstreamSha HEAD
+          if ($LASTEXITCODE -ne 0) {
+            $mergeOutput = git merge --no-edit --no-ff $upstreamRef 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              $unmerged = git diff --name-only --diff-filter=U
+              $status = git status --short
+              $conflicts = git diff --cc
+              $report = @(
+                '# Upstream merge conflict'
+                ''
+                "upstream: $env:UPSTREAM_REPOSITORY@$upstreamSha"
+                "fork before merge: $beforeSha"
+                ''
+                '## Unmerged files'
+                '```'
+                ($unmerged -join "`n")
+                '```'
+                '## Status'
+                '```'
+                ($status -join "`n")
+                '```'
+                '## Conflict diff'
+                '```diff'
+                ($conflicts -join "`n")
+                '```'
+              ) -join "`n"
+              [IO.File]::WriteAllText('sync-conflict.txt', $report)
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $report
+              throw "Upstream merge failed. See sync-conflict.txt and the Job Summary."
+            }
+            $changed = $true
+          }
+
+          $patchCheck = git apply --check --whitespace=error-all patches/bilibili-package.patch 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            $report = @(
+              '# Fork patch compatibility failure'
+              ''
+              "upstream: $env:UPSTREAM_REPOSITORY@$upstreamSha"
+              '```'
+              ($patchCheck -join "`n")
+              '```'
+            ) -join "`n"
+            [IO.File]::WriteAllText('sync-conflict.txt', $report)
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $report
+            throw 'patches/bilibili-package.patch no longer applies'
+          }
+
+          if ($changed) {
+            git push origin "HEAD:$env:FORK_BRANCH"
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to push the upstream merge' }
+          }
+          $forkSha = (git rev-parse HEAD).Trim()
+
+          $latestRelease = gh api "repos/$env:UPSTREAM_REPOSITORY/releases/latest" | ConvertFrom-Json
+          $latestTag = $latestRelease.tag_name
+          $latestReleaseSha = (git rev-list -n 1 $latestTag).Trim()
+          if (-not $latestReleaseSha) { throw "Unable to resolve upstream Release tag $latestTag" }
+
+          $forkReleases = @(gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json)
+          $marker = "[fork-upstream-tag]: $latestTag"
+          $alreadyReleased = $forkReleases | Where-Object {
+            -not $_.draft -and $_.body -and $_.body.Contains($marker)
+          } | Select-Object -First 1
+          $force = $env:FORCE_RELEASE -eq 'true'
+          $releaseNeeded = (-not $alreadyReleased) -or $force
+
+          "changed=$($changed.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "upstream_sha=$upstreamSha" >> $env:GITHUB_OUTPUT
+          "fork_sha=$forkSha" >> $env:GITHUB_OUTPUT
+          "latest_tag=$latestTag" >> $env:GITHUB_OUTPUT
+          "latest_release_sha=$latestReleaseSha" >> $env:GITHUB_OUTPUT
+          "release_needed=$($releaseNeeded.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value @"
+          ## Fork sync result
+
+          - Upstream branch: ``$upstreamBranch``
+          - Upstream SHA: ``$upstreamSha``
+          - Fork SHA: ``$forkSha``
+          - Source changed: ``$changed``
+          - Latest upstream Release: ``$latestTag`` (``$latestReleaseSha``)
+          - Fork Release required: ``$releaseNeeded``
+          "@
+
+      - name: Upload conflict diagnostics
+        if: failure() && hashFiles('sync-conflict.txt') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: upstream-sync-conflict
+          path: sync-conflict.txt
+          if-no-files-found: error
+
+  smoke-current-main:
+    name: Verify latest upstream main
+    needs: sync
+    if: >-
+      needs.sync.outputs.changed == 'true' &&
+      (needs.sync.outputs.release_needed != 'true' ||
+       needs.sync.outputs.latest_release_sha != needs.sync.outputs.upstream_sha)
+    uses: ./.github/workflows/build-release.yml
+    with:
+      source_ref: ${{ needs.sync.outputs.upstream_sha }}
+      fork_ref: ${{ needs.sync.outputs.fork_sha }}
+      publish: false
+    secrets: inherit
+
+  publish-release:
+    name: Publish latest upstream Release
+    needs: sync
+    if: needs.sync.outputs.release_needed == 'true'
+    uses: ./.github/workflows/build-release.yml
+    with:
+      source_ref: ${{ needs.sync.outputs.latest_tag }}
+      upstream_tag: ${{ needs.sync.outputs.latest_tag }}
+      fork_ref: ${{ needs.sync.outputs.fork_sha }}
+      publish: true
+      force_release: ${{ github.event_name == 'workflow_dispatch' && inputs.force_release || false }}
+    secrets: inherit

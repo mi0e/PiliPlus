@@ -1,0 +1,553 @@
+diff --git a/android/app/build.gradle.kts b/android/app/build.gradle.kts
+--- a/android/app/build.gradle.kts
++++ b/android/app/build.gradle.kts
+@@ -28,7 +28,7 @@ android {
+     }
+ 
+     defaultConfig {
+-        applicationId = "com.example.piliplus"
++        applicationId = "tv.danmaku.bili"
+         minSdk = flutter.minSdkVersion
+         targetSdk = 37
+         versionCode = flutter.versionCode
+@@ -43,12 +43,17 @@ android {
+             it.load(properties.inputStream())
+     }
+ 
+-    val config = keyProperties.getProperty("storeFile")?.let {
++    val storeFilePath = System.getenv("ANDROID_KEYSTORE_PATH")
++        ?: keyProperties.getProperty("storeFile")
++    val config = storeFilePath?.let {
+         signingConfigs.create("release") {
+             storeFile = file(it)
+-            storePassword = keyProperties.getProperty("storePassword")
+-            keyAlias = keyProperties.getProperty("keyAlias")
+-            keyPassword = keyProperties.getProperty("keyPassword")
++            storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
++                ?: keyProperties.getProperty("storePassword")
++            keyAlias = System.getenv("ANDROID_KEY_ALIAS")
++                ?: keyProperties.getProperty("keyAlias")
++            keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
++                ?: keyProperties.getProperty("keyPassword")
+             enableV1Signing = true
+             enableV2Signing = true
+         }
+diff --git a/android/app/src/main/AndroidManifest.xml b/android/app/src/main/AndroidManifest.xml
+--- a/android/app/src/main/AndroidManifest.xml
++++ b/android/app/src/main/AndroidManifest.xml
+@@ -106,7 +106,6 @@
+             <intent-filter android:label="PiliPlus">
+                 <action android:name="android.intent.action.VIEW" />
+                 <action android:name="android.intent.action.SEARCH" />
+-                <action android:name="com.example.piliplus.SHORTCUT" />
+ 
+                 <category android:name="android.intent.category.DEFAULT" />
+                 <category android:name="android.intent.category.BROWSABLE" />
+@@ -212,7 +211,7 @@
+             android:permission="android.permission.MANAGE_DOCUMENTS"
+             android:enabled="false"
+             android:exported="true"
+-            android:authorities="com.example.piliplus.MTDataFilesProvider"
++            android:authorities="${applicationId}.MTDataFilesProvider"
+             android:grantUriPermissions="true">
+             <intent-filter>
+                 <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+diff --git a/android/app/src/main/res/xml-v25/shortcuts.xml b/android/app/src/main/res/xml-v25/shortcuts.xml
+--- a/android/app/src/main/res/xml-v25/shortcuts.xml
++++ b/android/app/src/main/res/xml-v25/shortcuts.xml
+@@ -5,7 +5,7 @@
+         android:shortcutLongLabel="@string/search"
+         android:shortcutShortLabel="@string/search">
+         <intent
+-            android:action="com.example.piliplus.SHORTCUT"
++            android:action="android.intent.action.VIEW"
+             android:data="bilibili://search" />
+     </shortcut>
+     <shortcut
+@@ -14,7 +14,7 @@
+         android:shortcutLongLabel="@string/offline_video"
+         android:shortcutShortLabel="@string/offline_video">
+         <intent
+-            android:action="com.example.piliplus.SHORTCUT"
++            android:action="android.intent.action.VIEW"
+             android:data="bilibili://download" />
+     </shortcut>
+ </shortcuts>
+diff --git a/lib/build_config.dart b/lib/build_config.dart
+--- a/lib/build_config.dart
++++ b/lib/build_config.dart
+@@ -13,4 +13,35 @@ abstract final class BuildConfig {
+     'pili.hash',
+     defaultValue: 'N/A',
+   );
++
++  static const String forkCommitHash = String.fromEnvironment(
++    'fork.hash',
++    defaultValue: 'N/A',
++  );
++  static const String forkReleaseTag = String.fromEnvironment(
++    'FORK_RELEASE_TAG',
++  );
++  static const String updateRepoOwner = String.fromEnvironment(
++    'UPDATE_REPO_OWNER',
++  );
++  static const String updateRepoName = String.fromEnvironment(
++    'UPDATE_REPO_NAME',
++  );
++  static const String updateRepositorySlug =
++      '$updateRepoOwner/$updateRepoName';
++
++  static bool get updaterConfigured =>
++      updateRepoOwner.isNotEmpty && updateRepoName.isNotEmpty;
++
++  static String get sourceCodeUrl => updaterConfigured
++      ? 'https://github.com/$updateRepositorySlug'
++      : '';
++
++  static String get releasesApiUrl => updaterConfigured
++      ? 'https://api.github.com/repos/$updateRepositorySlug/releases?per_page=20'
++      : '';
++
++  static String get latestReleaseUrl => updaterConfigured
++      ? '$sourceCodeUrl/releases/latest'
++      : '';
+ }
+diff --git a/lib/common/constants.dart b/lib/common/constants.dart
+--- a/lib/common/constants.dart
++++ b/lib/common/constants.dart
+@@ -1,6 +1,8 @@
++import 'package:PiliPlus/build_config.dart';
++
+ abstract final class Constants {
+   static const appName = 'PiliPlus';
+-  static const sourceCodeUrl = 'https://github.com/bggRGjQaUbCoE/PiliPlus';
++  static String get sourceCodeUrl => BuildConfig.sourceCodeUrl;
+ 
+   // 27eb53fc9058f8c3  移动端 Android
+   // 4409e2ce8ffd12b8  HD版
+diff --git a/lib/http/api.dart b/lib/http/api.dart
+--- a/lib/http/api.dart
++++ b/lib/http/api.dart
+@@ -409,10 +409,6 @@ abstract final class Api {
+   // 黑名单
+   static const String blackLst = '/x/relation/blacks';
+ 
+-  // github 获取最新版
+-  static const String latestApp =
+-      'https://api.github.com/repos/bggRGjQaUbCoE/PiliPlus/releases';
+-
+   // 多少人在看
+   // https://api.bilibili.com/x/player/online/total?aid=913663681&cid=1203559746&bvid=BV1MM4y1s7NZ&ts=56427838
+   static const String onlineTotal = '/x/player/online/total';
+diff --git a/lib/utils/update.dart b/lib/utils/update.dart
+--- a/lib/utils/update.dart
++++ b/lib/utils/update.dart
+@@ -2,148 +2,135 @@ import 'dart:io' show Platform;
+ 
+ import 'package:PiliPlus/build_config.dart';
+ import 'package:PiliPlus/common/constants.dart';
+-import 'package:PiliPlus/http/api.dart';
+ import 'package:PiliPlus/http/browser_ua.dart';
+ import 'package:PiliPlus/http/init.dart';
+ import 'package:PiliPlus/utils/accounts/account.dart';
+ import 'package:PiliPlus/utils/page_utils.dart';
+ import 'package:PiliPlus/utils/storage.dart';
+ import 'package:PiliPlus/utils/storage_key.dart';
++import 'package:PiliPlus/utils/update_helper.dart';
+ import 'package:device_info_plus/device_info_plus.dart';
+ import 'package:dio/dio.dart';
+-import 'package:flutter/foundation.dart' show kDebugMode;
++import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
+ import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
+ import 'package:material_ui/material_ui.dart';
+ 
+ abstract final class Update {
+-  // 检查更新
+   static Future<void> checkUpdate([bool isAuto = true]) async {
+     if (kDebugMode) return;
+     SmartDialog.dismiss();
++    if (!BuildConfig.updaterConfigured) {
++      if (!isAuto) SmartDialog.showToast('当前构建未配置更新仓库');
++      return;
++    }
+     try {
+       final res = await Request().get(
+-        Api.latestApp,
++        BuildConfig.releasesApiUrl,
+         options: Options(
+-          headers: {'user-agent': BrowserUa.mob},
++          headers: {
++            'user-agent': BrowserUa.mob,
++            'accept': 'application/vnd.github+json',
++            'x-piliplus-fork-repository': BuildConfig.updateRepositorySlug,
++          },
+           extra: {'account': const NoAccount()},
+         ),
+       );
+-      if (res.data is Map || res.data.isEmpty) {
++      final data = UpdateHelper.latestValidRelease(res.data);
++      if (data == null) {
+         if (!isAuto) {
+-          SmartDialog.showToast('检查更新失败，GitHub接口未返回数据，请检查网络');
++          SmartDialog.showToast('检查更新失败，未找到有效的 Fork APK');
+         }
+         return;
+       }
+-      final data = res.data[0];
+-      final int latest =
+-          DateTime.parse(data['created_at']).millisecondsSinceEpoch ~/ 1000;
+-      if (BuildConfig.buildTime >= latest) {
++      if (!UpdateHelper.hasUpdate(data, BuildConfig.versionCode)) {
+         if (!isAuto) {
+           SmartDialog.showToast('已是最新版本');
+         }
+-      } else {
+-        SmartDialog.show(
+-          animationType: SmartAnimationType.centerFade_otherSlide,
+-          builder: (context) {
+-            final colorScheme = ColorScheme.of(context);
+-            Widget downloadBtn(String text, {String? ext}) => TextButton(
+-              onPressed: () => onDownload(data, ext: ext),
+-              child: Text(text),
+-            );
+-            return AlertDialog(
+-              title: const Text('🎉 发现新版本 '),
+-              content: SizedBox(
+-                height: 280,
+-                child: SingleChildScrollView(
+-                  child: Column(
+-                    crossAxisAlignment: CrossAxisAlignment.start,
+-                    children: [
+-                      Text(
+-                        '${data['tag_name']}',
+-                        style: const TextStyle(fontSize: 20),
++        return;
++      }
++      SmartDialog.show(
++        animationType: SmartAnimationType.centerFade_otherSlide,
++        builder: (context) {
++          final colorScheme = ColorScheme.of(context);
++          return AlertDialog(
++            title: const Text('🎉 发现新版本 '),
++            content: SizedBox(
++              height: 280,
++              child: SingleChildScrollView(
++                child: Column(
++                  crossAxisAlignment: CrossAxisAlignment.start,
++                  children: [
++                    Text(
++                      '${data['tag_name']}',
++                      style: const TextStyle(fontSize: 20),
++                    ),
++                    const SizedBox(height: 8),
++                    Text('${data['body']}'),
++                    TextButton(
++                      onPressed: () => PageUtils.launchURL(
++                        '${Constants.sourceCodeUrl}/commits/main',
+                       ),
+-                      const SizedBox(height: 8),
+-                      Text('${data['body']}'),
+-                      TextButton(
+-                        onPressed: () => PageUtils.launchURL(
+-                          '${Constants.sourceCodeUrl}/commits/main',
+-                        ),
+-                        child: Text(
+-                          "点此查看完整更新(即commit)内容",
+-                          style: TextStyle(color: colorScheme.primary),
+-                        ),
++                      child: Text(
++                        '点此查看完整更新（即 commit）内容',
++                        style: TextStyle(color: colorScheme.primary),
+                       ),
+-                    ],
+-                  ),
++                    ),
++                  ],
+                 ),
+               ),
+-              actions: [
+-                if (isAuto)
+-                  TextButton(
+-                    onPressed: () {
+-                      SmartDialog.dismiss();
+-                      GStorage.setting.put(SettingBoxKey.autoUpdate, false);
+-                    },
+-                    child: Text(
+-                      '不再提醒',
+-                      style: TextStyle(color: colorScheme.outline),
+-                    ),
+-                  ),
++            ),
++            actions: [
++              if (isAuto)
+                 TextButton(
+-                  onPressed: SmartDialog.dismiss,
++                  onPressed: () {
++                    SmartDialog.dismiss();
++                    GStorage.setting.put(SettingBoxKey.autoUpdate, false);
++                  },
+                   child: Text(
+-                    '取消',
++                    '不再提醒',
+                     style: TextStyle(color: colorScheme.outline),
+                   ),
+                 ),
+-                if (Platform.isWindows) ...[
+-                  downloadBtn('zip', ext: 'zip'),
+-                  downloadBtn('exe', ext: 'exe'),
+-                ] else if (Platform.isLinux) ...[
+-                  downloadBtn('rpm', ext: 'rpm'),
+-                  downloadBtn('deb', ext: 'deb'),
+-                  downloadBtn('targz', ext: 'tar.gz'),
+-                ] else
+-                  downloadBtn('Github'),
+-              ],
+-            );
+-          },
+-        );
+-      }
++              TextButton(
++                onPressed: SmartDialog.dismiss,
++                child: Text(
++                  '取消',
++                  style: TextStyle(color: colorScheme.outline),
++                ),
++              ),
++              TextButton(
++                onPressed: () => onDownload(data),
++                child: const Text('Github'),
++              ),
++            ],
++          );
++        },
++      );
+     } catch (e) {
+       if (kDebugMode) debugPrint('failed to check update: $e');
++      if (!isAuto) SmartDialog.showToast('检查更新失败，请检查网络');
+     }
+   }
+ 
+-  // 下载适用于当前系统的安装包
+-  static Future<void> onDownload(Map data, {String? ext}) async {
++  static Future<void> onDownload(Map<String, dynamic> data) async {
+     SmartDialog.dismiss();
+     try {
+-      void download(String plat) {
+-        if (data['assets'].isNotEmpty) {
+-          for (Map<String, dynamic> i in data['assets']) {
+-            final String name = i['name'];
+-            if (name.contains(plat) &&
+-                (ext == null || ext.isEmpty ? true : name.endsWith(ext))) {
+-              PageUtils.launchURL(i['browser_download_url']);
+-              return;
+-            }
+-          }
+-          throw UnsupportedError('platform not found: $plat');
+-        }
+-      }
+-
+-      if (Platform.isAndroid) {
+-        // 获取设备信息
+-        AndroidDeviceInfo androidInfo = await DeviceInfoPlugin().androidInfo;
+-        // [arm64-v8a]
+-        download(androidInfo.supportedAbis.first);
+-      } else {
+-        download(Platform.operatingSystem);
+-      }
++      if (!Platform.isAndroid) throw UnsupportedError('Android only');
++      final AndroidDeviceInfo androidInfo =
++          await DeviceInfoPlugin().androidInfo;
++      final asset = UpdateHelper.assetForAbis(
++        data,
++        androidInfo.supportedAbis,
++        BuildConfig.updateRepoOwner,
++        BuildConfig.updateRepoName,
++      );
++      if (asset == null) throw UnsupportedError('ABI asset not found');
++      await PageUtils.launchURL('${asset['browser_download_url']}');
+     } catch (e) {
+       if (kDebugMode) debugPrint('download error: $e');
+-      PageUtils.launchURL('${Constants.sourceCodeUrl}/releases/latest');
++      if (BuildConfig.latestReleaseUrl.isNotEmpty) {
++        await PageUtils.launchURL(BuildConfig.latestReleaseUrl);
++      }
+     }
+   }
+ }
+diff --git a/lib/utils/update_helper.dart b/lib/utils/update_helper.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/utils/update_helper.dart
+@@ -0,0 +1,82 @@
++abstract final class UpdateHelper {
++  static final RegExp _apkPattern = RegExp(
++    r'^PiliPlus-tv\.danmaku\.bili_(.+)\+([0-9]+)_(arm64-v8a|armeabi-v7a|x86_64)\.apk$',
++  );
++
++  static int? versionCodeFromAssetName(String name) {
++    final match = _apkPattern.firstMatch(name);
++    return match == null ? null : int.tryParse(match.group(2)!);
++  }
++
++  static String? abiFromAssetName(String name) =>
++      _apkPattern.firstMatch(name)?.group(3);
++
++  static bool isExpectedDownloadUrl(
++    String? value,
++    String owner,
++    String repository,
++  ) {
++    if (value == null || owner.isEmpty || repository.isEmpty) return false;
++    final uri = Uri.tryParse(value);
++    if (uri == null || uri.scheme != 'https' || uri.host != 'github.com') {
++      return false;
++    }
++    final segments = uri.pathSegments;
++    return segments.length >= 4 &&
++        segments[0] == owner &&
++        segments[1] == repository &&
++        segments[2] == 'releases' &&
++        segments[3] == 'download';
++  }
++
++  static Iterable<Map<String, dynamic>> _assets(Map<String, dynamic> release) {
++    final assets = release['assets'];
++    if (assets is! List) return const <Map<String, dynamic>>[];
++    return assets.whereType<Map>().map(Map<String, dynamic>.from);
++  }
++
++  static int? releaseVersionCode(Map<String, dynamic> release) {
++    final codes = _assets(release)
++        .map((asset) => versionCodeFromAssetName('${asset['name']}'))
++        .whereType<int>()
++        .toSet();
++    return codes.length == 1 ? codes.single : null;
++  }
++
++  static Map<String, dynamic>? latestValidRelease(Object? payload) {
++    if (payload is! List) return null;
++    for (final rawRelease in payload.whereType<Map>()) {
++      final release = Map<String, dynamic>.from(rawRelease);
++      if (release['draft'] == true || release['prerelease'] == true) continue;
++      if (releaseVersionCode(release) != null) return release;
++    }
++    return null;
++  }
++
++  static Map<String, dynamic>? assetForAbis(
++    Map<String, dynamic> release,
++    Iterable<String> supportedAbis,
++    String owner,
++    String repository,
++  ) {
++    final assets = _assets(release).toList(growable: false);
++    for (final abi in supportedAbis) {
++      for (final asset in assets) {
++        if (abiFromAssetName('${asset['name']}') == abi &&
++            isExpectedDownloadUrl(
++              asset['browser_download_url']?.toString(),
++              owner,
++              repository,
++            )) {
++          return asset;
++        }
++      }
++    }
++    return null;
++  }
++
++  static bool hasUpdate(Map<String, dynamic> release, int currentVersionCode) {
++    final latestVersionCode = releaseVersionCode(release);
++    return latestVersionCode != null && latestVersionCode > currentVersionCode;
++  }
++}
+diff --git a/test/fork_update_helper_test.dart b/test/fork_update_helper_test.dart
+new file mode 100644
+--- /dev/null
++++ b/test/fork_update_helper_test.dart
+@@ -0,0 +1,85 @@
++import 'package:PiliPlus/utils/update_helper.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++Map<String, dynamic> release({
++  int code = 5281,
++  bool draft = false,
++  bool prerelease = false,
++  String owner = 'mi0e',
++  String repository = 'PiliPlus',
++}) => {
++  'draft': draft,
++  'prerelease': prerelease,
++  'tag_name': 'v2.1.2.3-bili.1',
++  'assets': [
++    for (final abi in ['arm64-v8a', 'armeabi-v7a', 'x86_64'])
++      {
++        'name': 'PiliPlus-tv.danmaku.bili_2.1.2.3-bili.1+${code}_$abi.apk',
++        'browser_download_url':
++            'https://github.com/$owner/$repository/releases/download/v2.1.2.3-bili.1/app.apk',
++      },
++  ],
++};
++
++void main() {
++  test('parses the version contract', () {
++    expect(
++      UpdateHelper.versionCodeFromAssetName(
++        'PiliPlus-tv.danmaku.bili_2.1.2.3-bili.1+5281_arm64-v8a.apk',
++      ),
++      5281,
++    );
++    expect(UpdateHelper.versionCodeFromAssetName('PiliPlus.apk'), isNull);
++  });
++
++  test('ignores draft, prerelease and invalid releases', () {
++    final valid = release();
++    expect(
++      UpdateHelper.latestValidRelease([
++        release(draft: true),
++        release(prerelease: true),
++        {'assets': []},
++        valid,
++      ]),
++      equals(valid),
++    );
++    expect(UpdateHelper.latestValidRelease({'message': 'rate limited'}), isNull);
++  });
++
++  test('compares monotonically increasing version codes', () {
++    expect(UpdateHelper.hasUpdate(release(), 5280), isTrue);
++    expect(UpdateHelper.hasUpdate(release(), 5281), isFalse);
++    expect(UpdateHelper.hasUpdate(release(), 5282), isFalse);
++  });
++
++  test('selects the first supported ABI from the configured repository', () {
++    final asset = UpdateHelper.assetForAbis(
++      release(),
++      ['x86_64', 'arm64-v8a'],
++      'mi0e',
++      'PiliPlus',
++    );
++    expect(UpdateHelper.abiFromAssetName('${asset?['name']}'), 'x86_64');
++    expect(
++      UpdateHelper.assetForAbis(
++        release(owner: 'bggRGjQaUbCoE'),
++        ['arm64-v8a'],
++        'mi0e',
++        'PiliPlus',
++      ),
++      isNull,
++    );
++  });
++
++  test('rejects empty and non-release repository URLs', () {
++    expect(UpdateHelper.isExpectedDownloadUrl(null, 'mi0e', 'PiliPlus'), isFalse);
++    expect(
++      UpdateHelper.isExpectedDownloadUrl(
++        'https://github.com/mi0e/PiliPlus/issues',
++        'mi0e',
++        'PiliPlus',
++      ),
++      isFalse,
++    );
++  });
++}

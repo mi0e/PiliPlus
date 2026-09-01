@@ -1,0 +1,370 @@
+name: Fork - Build Android
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "patches/**"
+      - "scripts/fork/**"
+      - ".github/workflows/build-release.yml"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Build mode"
+        required: true
+        default: verify-main
+        type: choice
+        options:
+          - verify-main
+          - release-latest-upstream
+      force_release:
+        description: "Create another bili revision for an already-published upstream Release"
+        required: false
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      mode:
+        required: false
+        default: verify-main
+        type: string
+      source_ref:
+        required: false
+        default: main
+        type: string
+      upstream_tag:
+        required: false
+        default: ""
+        type: string
+      fork_ref:
+        required: false
+        default: ""
+        type: string
+      publish:
+        required: false
+        default: false
+        type: boolean
+      force_release:
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: false
+      ANDROID_KEYSTORE_PASSWORD:
+        required: false
+      ANDROID_KEY_ALIAS:
+        required: false
+      ANDROID_KEY_PASSWORD:
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-android-${{ github.ref }}-${{ inputs.publish || false }}
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: bggRGjQaUbCoE/PiliPlus
+
+jobs:
+  build:
+    name: Build, verify and optionally publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork layer
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.fork_ref || github.sha }}
+          path: fork-layer
+
+      - name: Resolve build source
+        id: source
+        shell: pwsh
+        env:
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+          INPUT_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+          DISPATCH_MODE: ${{ inputs.mode }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ref = $env:INPUT_SOURCE_REF
+          $tag = $env:INPUT_UPSTREAM_TAG
+          $publish = $env:INPUT_PUBLISH -eq 'true'
+
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            if ($env:DISPATCH_MODE -eq 'release-latest-upstream') {
+              $release = gh api "repos/$env:UPSTREAM_REPOSITORY/releases/latest" | ConvertFrom-Json
+              $ref = $release.tag_name
+              $tag = $release.tag_name
+              $publish = $true
+            } else {
+              $ref = 'main'
+              $tag = ''
+              $publish = $false
+            }
+          } elseif ($env:GITHUB_EVENT_NAME -eq 'push') {
+            $ref = 'main'
+            $tag = ''
+            $publish = $false
+          }
+          if (-not $ref) { $ref = 'main' }
+
+          "ref=$ref" >> $env:GITHUB_OUTPUT
+          "upstream_tag=$tag" >> $env:GITHUB_OUTPUT
+          "publish=$($publish.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Checkout exact upstream source
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.UPSTREAM_REPOSITORY }}
+          fetch-depth: 0
+          ref: ${{ steps.source.outputs.ref }}
+          path: source
+
+      - name: Resolve fork version and idempotency
+        id: version
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISH: ${{ steps.source.outputs.publish }}
+          UPSTREAM_TAG: ${{ steps.source.outputs.upstream_tag }}
+          FORCE_RELEASE: ${{ inputs.force_release || false }}
+        run: |
+          $publish = $env:PUBLISH -eq 'true'
+          $force = $env:FORCE_RELEASE -eq 'true'
+          & ./fork-layer/scripts/fork/resolve-release.ps1 `
+            -SourceDir ./source `
+            -Repository $env:GITHUB_REPOSITORY `
+            -Publish:$publish `
+            -UpstreamTag $env:UPSTREAM_TAG `
+            -ForceRelease:$force
+
+      - name: Stop when this upstream Release is already published
+        if: steps.version.outputs.skip == 'true'
+        run: echo "The upstream Release already has a published fork build."
+
+      - name: Set up Java 17
+        if: steps.version.outputs.skip != 'true'
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            source/android/*.gradle*
+            source/android/**/gradle-wrapper.properties
+
+      - name: Set up pinned Flutter
+        if: steps.version.outputs.skip != 'true'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: source/pubspec.yaml
+          cache: true
+
+      - name: Apply fail-closed fork patch and build defines
+        if: steps.version.outputs.skip != 'true'
+        id: prepare
+        shell: pwsh
+        run: |
+          & ./fork-layer/scripts/fork/prepare-build.ps1 `
+            -SourceDir ./source `
+            -PatchPath ./fork-layer/patches/bilibili-package.patch `
+            -VersionName '${{ steps.version.outputs.version_name }}' `
+            -VersionCode ${{ steps.version.outputs.version_code }} `
+            -ForkCommit '${{ inputs.fork_ref || github.sha }}' `
+            -RepositoryOwner '${{ github.repository_owner }}' `
+            -RepositoryName '${{ github.event.repository.name }}' `
+            -ReleaseTag '${{ steps.version.outputs.release_tag }}'
+
+      - name: Apply upstream Flutter and package patches
+        if: steps.version.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $env:GITHUB_WORKSPACE = (Resolve-Path ./source).Path
+          Push-Location ./source
+          try { & ./lib/scripts/patch.ps1 android } finally { Pop-Location }
+
+      - name: Test fork updater and analyze changed Dart code
+        if: steps.version.outputs.skip != 'true'
+        working-directory: source
+        shell: bash
+        run: |
+          dart format --output=none --set-exit-if-changed \
+            lib/build_config.dart lib/common/constants.dart lib/utils/update.dart \
+            lib/utils/update_helper.dart test/fork_update_helper_test.dart
+          flutter test --no-pub test/fork_update_helper_test.dart
+          flutter analyze --no-pub --no-fatal-infos \
+            lib/build_config.dart lib/common/constants.dart lib/utils/update.dart \
+            lib/utils/update_helper.dart test/fork_update_helper_test.dart
+
+      - name: Restore production keystore
+        if: steps.version.outputs.skip != 'true' && steps.source.outputs.publish == 'true'
+        id: keystore
+        shell: pwsh
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          EXPECTED_CERTIFICATE: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+        run: |
+          foreach ($name in @('KEYSTORE_BASE64', 'KEYSTORE_PASSWORD', 'KEY_ALIAS', 'KEY_PASSWORD', 'EXPECTED_CERTIFICATE')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Missing production signing configuration: $name"
+            }
+          }
+          $path = Join-Path $env:RUNNER_TEMP 'piliplus-fork-release.jks'
+          [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:KEYSTORE_BASE64))
+          "path=$path" >> $env:GITHUB_OUTPUT
+
+      - name: Build split release APKs
+        if: steps.version.outputs.skip != 'true'
+        working-directory: source
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ steps.keystore.outputs.path }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          flutter build apk --release --split-per-abi \
+            --build-name='${{ steps.version.outputs.version_name }}' \
+            --build-number='${{ steps.version.outputs.version_code }}' \
+            --dart-define-from-file=pili_release.json --no-pub
+
+      - name: Normalize artifact names
+        if: steps.version.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path ./artifacts -Force | Out-Null
+          Get-ChildItem ./source/build/app/outputs/flutter-apk/app-*-release.apk | ForEach-Object {
+            $match = [regex]::Match($_.Name, '^app-(.+)-release\.apk$')
+            if (-not $match.Success) { throw "Unexpected Flutter APK name: $($_.Name)" }
+            $target = 'PiliPlus-tv.danmaku.bili_${{ steps.version.outputs.version_name }}+${{ steps.version.outputs.version_code }}_' + $match.Groups[1].Value + '.apk'
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path ./artifacts $target)
+          }
+
+      - name: Download previous signed APK
+        if: >-
+          steps.version.outputs.skip != 'true' &&
+          steps.source.outputs.publish == 'true' &&
+          steps.version.outputs.previous_tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path ./previous -Force | Out-Null
+          gh release download '${{ steps.version.outputs.previous_tag }}' `
+            --repo $env:GITHUB_REPOSITORY `
+            --pattern '*_arm64-v8a.apk' `
+            --dir ./previous
+
+      - name: Verify package, manifest, updater and signing certificate
+        if: steps.version.outputs.skip != 'true'
+        id: verify
+        shell: pwsh
+        env:
+          EXPECTED_CERTIFICATE: ${{ steps.source.outputs.publish == 'true' && vars.ANDROID_SIGNING_CERT_SHA256 || '' }}
+        run: |
+          $previous = Get-ChildItem ./previous -Filter '*.apk' -ErrorAction SilentlyContinue | Select-Object -First 1
+          $args = @{
+            ApkDirectory = './artifacts'
+            VersionName = '${{ steps.version.outputs.version_name }}'
+            VersionCode = [int64]'${{ steps.version.outputs.version_code }}'
+            RepositoryOwner = '${{ github.repository_owner }}'
+            RepositoryName = '${{ github.event.repository.name }}'
+            ExpectedCertificateSha256 = $env:EXPECTED_CERTIFICATE
+          }
+          if ($previous) { $args.PreviousApk = $previous.FullName }
+          & ./fork-layer/scripts/fork/verify-apks.ps1 @args
+
+      - name: Create release metadata and checksums
+        if: steps.version.outputs.skip != 'true' && steps.source.outputs.publish == 'true'
+        shell: pwsh
+        run: |
+          & ./fork-layer/scripts/fork/write-release-metadata.ps1 `
+            -ApkDirectory ./artifacts `
+            -OutputDirectory ./artifacts `
+            -VersionName '${{ steps.version.outputs.version_name }}' `
+            -VersionCode ${{ steps.version.outputs.version_code }} `
+            -ReleaseTag '${{ steps.version.outputs.release_tag }}' `
+            -UpstreamRepository $env:UPSTREAM_REPOSITORY `
+            -UpstreamTag '${{ steps.source.outputs.upstream_tag }}' `
+            -UpstreamCommit '${{ steps.version.outputs.source_sha }}' `
+            -ForkRepository $env:GITHUB_REPOSITORY `
+            -ForkCommit '${{ inputs.fork_ref || github.sha }}' `
+            -CertificateSha256 '${{ steps.verify.outputs.certificate_sha256 }}'
+
+      - name: Upload build artifacts
+        if: steps.version.outputs.skip != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          name: fork-android-${{ steps.version.outputs.version_name }}-${{ steps.version.outputs.source_sha }}
+          path: artifacts/*
+          if-no-files-found: error
+
+      - name: Create or complete draft Release
+        if: steps.version.outputs.skip != 'true' && steps.source.outputs.publish == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ steps.version.outputs.release_tag }}'
+          $upstreamTag = '${{ steps.source.outputs.upstream_tag }}'
+          $upstreamRelease = gh api "repos/$env:UPSTREAM_REPOSITORY/releases/tags/$upstreamTag" | ConvertFrom-Json
+          $notes = @"
+          [fork-upstream-tag]: $upstreamTag
+          [fork-upstream-commit]: ${{ steps.version.outputs.source_sha }}
+          [fork-layer-commit]: ${{ inputs.fork_ref || github.sha }}
+
+          > 这是非官方的 PiliPlus 自定义构建，Android 包名为 ``tv.danmaku.bili``，并非哔哩哔哩官方客户端。
+
+          ## Fork 差异
+
+          - 使用固定的自定义签名和 ``tv.danmaku.bili`` applicationId。
+          - 应用内更新仅查询 ``$env:GITHUB_REPOSITORY`` Releases。
+          - 构建来源：``$env:UPSTREAM_REPOSITORY@$upstreamTag``。
+
+          ## 上游 Release Notes
+
+          $($upstreamRelease.body)
+          "@
+          [IO.File]::WriteAllText('release-notes.md', $notes)
+
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit $tag --repo $env:GITHUB_REPOSITORY `
+              --title "PiliPlus Bilibili Package ${{ steps.version.outputs.version_name }}" `
+              --notes-file release-notes.md
+          } else {
+            gh release create $tag --repo $env:GITHUB_REPOSITORY `
+              --target '${{ inputs.fork_ref || github.sha }}' `
+              --draft `
+              --title "PiliPlus Bilibili Package ${{ steps.version.outputs.version_name }}" `
+              --notes-file release-notes.md
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Unable to create/update draft Release $tag" }
+
+          Get-ChildItem ./artifacts -File | ForEach-Object {
+            gh release upload $tag $_.FullName --repo $env:GITHUB_REPOSITORY --clobber
+            if ($LASTEXITCODE -ne 0) { throw "Unable to upload $($_.Name)" }
+          }
+          $release = gh release view $tag --repo $env:GITHUB_REPOSITORY --json databaseId | ConvertFrom-Json
+          gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/releases/$($release.databaseId)" `
+            -F draft=false -f make_latest=true *> $null
+          if ($LASTEXITCODE -ne 0) { throw "Unable to publish Release $tag" }
+
+      - name: Clean signing material
+        if: always()
+        shell: pwsh
+        run: |
+          $keystore = Join-Path $env:RUNNER_TEMP 'piliplus-fork-release.jks'
+          if (Test-Path -LiteralPath $keystore) { Remove-Item -LiteralPath $keystore -Force }
+          if (Test-Path -LiteralPath ./source/pili_release.json) {
+            Remove-Item -LiteralPath ./source/pili_release.json -Force
+          }
