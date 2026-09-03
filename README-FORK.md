@@ -72,6 +72,8 @@ Windows PowerShell 可生成 Base64：
 
 同时确认仓库 `Settings → Actions → General → Workflow permissions` 允许读写内容。默认使用受限的 `GITHUB_TOKEN` push 同步结果；只有分支保护明确阻止它时，才配置可写当前仓库内容的 `FORK_SYNC_TOKEN` Secret。不要给这个 token 超出当前 Fork 所需的权限。
 
+在四个签名 Secret 和 `ANDROID_SIGNING_CERT_SHA256` 全部配置前，每日任务仍会正常 merge 上游并运行非发布验证，但会安全跳过正式 Release，并在 Job Summary 中保留待发布提示。配置完成后的下一次同步会自动补发，不需要修改源码。
+
 ## 第一次与后续 Release
 
 完成签名配置后，手动运行 `Fork - Sync upstream`。它会同步 main，并在当前上游正式 Release 尚未被本 Fork 构建时自动创建首个 `v…-bili.1` Release。

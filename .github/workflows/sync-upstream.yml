@@ -33,6 +33,7 @@ jobs:
       latest_tag: ${{ steps.sync.outputs.latest_tag }}
       latest_release_sha: ${{ steps.sync.outputs.latest_release_sha }}
       release_needed: ${{ steps.sync.outputs.release_needed }}
+      signing_ready: ${{ steps.sync.outputs.signing_ready }}
     steps:
       - name: Checkout fork maintenance branch
         uses: actions/checkout@v7
@@ -47,6 +48,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN || github.token }}
           FORCE_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.force_release || false }}
+          SIGNING_READY: >-
+            ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' &&
+                secrets.ANDROID_KEYSTORE_PASSWORD != '' &&
+                secrets.ANDROID_KEY_ALIAS != '' &&
+                secrets.ANDROID_KEY_PASSWORD != '' &&
+                vars.ANDROID_SIGNING_CERT_SHA256 != '' }}
         run: |
           $ErrorActionPreference = 'Stop'
           git config user.name 'github-actions[bot]'
@@ -127,6 +134,11 @@ jobs:
           } | Select-Object -First 1
           $force = $env:FORCE_RELEASE -eq 'true'
           $releaseNeeded = (-not $alreadyReleased) -or $force
+          $signingReady = $env:SIGNING_READY -eq 'true'
+
+          if ($releaseNeeded -and -not $signingReady) {
+            Write-Warning 'Fork Release is pending, but production signing is not configured; publishing was safely skipped.'
+          }
 
           "changed=$($changed.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           "upstream_sha=$upstreamSha" >> $env:GITHUB_OUTPUT
@@ -134,6 +146,7 @@ jobs:
           "latest_tag=$latestTag" >> $env:GITHUB_OUTPUT
           "latest_release_sha=$latestReleaseSha" >> $env:GITHUB_OUTPUT
           "release_needed=$($releaseNeeded.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "signing_ready=$($signingReady.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
 
           Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value @"
           ## Fork sync result
@@ -144,6 +157,11 @@ jobs:
           - Source changed: ``$changed``
           - Latest upstream Release: ``$latestTag`` (``$latestReleaseSha``)
           - Fork Release required: ``$releaseNeeded``
+          - Production signing configured: ``$signingReady``
+
+          $(if ($releaseNeeded -and -not $signingReady) {
+            "> [!WARNING]`n> Release publishing is pending until all four Android signing Secrets and ``ANDROID_SIGNING_CERT_SHA256`` are configured."
+          })
           "@
 
       - name: Upload conflict diagnostics
@@ -159,7 +177,8 @@ jobs:
     needs: sync
     if: >-
       needs.sync.outputs.changed == 'true' &&
-      (needs.sync.outputs.release_needed != 'true' ||
+      (needs.sync.outputs.signing_ready != 'true' ||
+       needs.sync.outputs.release_needed != 'true' ||
        needs.sync.outputs.latest_release_sha != needs.sync.outputs.upstream_sha)
     uses: ./.github/workflows/build-release.yml
     with:
@@ -171,7 +190,9 @@ jobs:
   publish-release:
     name: Publish latest upstream Release
     needs: sync
-    if: needs.sync.outputs.release_needed == 'true'
+    if: >-
+      needs.sync.outputs.release_needed == 'true' &&
+      needs.sync.outputs.signing_ready == 'true'
     uses: ./.github/workflows/build-release.yml
     with:
       source_ref: ${{ needs.sync.outputs.latest_tag }}
