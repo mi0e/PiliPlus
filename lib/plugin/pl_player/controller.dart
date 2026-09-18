@@ -945,6 +945,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           }
 
           makeHeartBeat(-1, type: .completed);
+
+          _wakeLockTimer?.cancel();
+          _wakeLockTimer = Timer(
+            const Duration(milliseconds: 500),
+            _stopWakeLock,
+          );
         }
       }),
 
@@ -970,9 +976,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }),
       stream.buffering.listen((bool buffering) {
         isBuffering.value = buffering;
-        if (buffering) _stopWakeLockTimer();
         final playerStatus = this.playerStatus.value;
         if (!playerStatus.isCompleted) {
+          _stopWakeLockTimer();
           videoPlayerServiceHandler?.onStatusChange(
             playerStatus,
             buffering,
