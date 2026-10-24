@@ -200,6 +200,14 @@ jobs:
           Push-Location ./source
           try { & ./lib/scripts/patch.ps1 android } finally { Pop-Location }
 
+      # flutter test builds native assets for the host; cnativeapi's hook needs these on Linux.
+      - name: Install host native-asset build dependencies
+        if: steps.version.outputs.skip != 'true'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libgtk-3-dev libx11-dev libxi-dev
+
       - name: Test fork updater and analyze changed Dart code
         if: steps.version.outputs.skip != 'true'
         working-directory: source
